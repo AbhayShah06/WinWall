@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+
+# personal / generated / large
+settings.json
+library/
+thumbnails/
+samples/
+*.log
+
+# PyInstaller build output
+build/
+dist/
+*.spec
+
+# scratch / debug scripts
+_*.py
