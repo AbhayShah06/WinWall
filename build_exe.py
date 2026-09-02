@@ -37,6 +37,7 @@ def main():
         "--add-binary", "%s%s." % (mpv, os.pathsep),   # mpv.exe at bundle root
         "--hidden-import", "PySide6.QtMultimedia",
         "--hidden-import", "PySide6.QtMultimediaWidgets",
+        "--hidden-import", "PySide6.QtNetwork",
         os.path.join(HERE, "app.py"),
     ]
     print("Running PyInstaller...")

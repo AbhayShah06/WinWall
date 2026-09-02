@@ -17,7 +17,7 @@ import shutil
 import winreg
 import subprocess
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtNetwork, QtWidgets
 
 try:
     from PySide6.QtMultimedia import QMediaPlayer
@@ -853,10 +853,39 @@ class WinWall(QtWidgets.QMainWindow):
         QtWidgets.QApplication.quit()
 
 
+SINGLETON = "WinWall_singleton"
+
+
 def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+
+    # Single instance: if WinWall is already running, tell it to show its window
+    # and exit, so two copies never fight over the wallpaper.
+    probe = QtNetwork.QLocalSocket()
+    probe.connectToServer(SINGLETON)
+    if probe.waitForConnected(200):
+        probe.write(b"show")
+        probe.flush()
+        probe.waitForBytesWritten(300)
+        probe.disconnectFromServer()
+        return 0
+    QtNetwork.QLocalServer.removeServer(SINGLETON)  # clear any stale socket
+    server = QtNetwork.QLocalServer()
+    server.listen(SINGLETON)
+
     w = WinWall()
+    w._singleton_server = server  # keep a reference alive
+
+    def _on_second_launch():
+        conn = server.nextPendingConnection()
+        if conn:
+            conn.readAll()
+            w.showNormal()
+            w.raise_()
+            w.activateWindow()
+    server.newConnection.connect(_on_second_launch)
+
     if os.environ.get("WINWALL_SELFTEST"):
         w.show()
         QtCore.QTimer.singleShot(1500, app.quit)
