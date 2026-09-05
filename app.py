@@ -28,6 +28,7 @@ except Exception:
 
 import engine
 import shop
+import updater
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # Wallpapers + settings live in a hidden per-user folder (%LOCALAPPDATA%\WinWall),
@@ -43,6 +44,7 @@ SETTINGS = os.path.join(DATA_DIR, "settings.json")
 VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".gif")
 CREATE_NO_WINDOW = 0x08000000
 ACCENT = "#7c5cff"
+VERSION = "1.0.0"
 
 
 # --------------------------------------------------------------------------- #
@@ -308,6 +310,41 @@ class MotionWorker(QtCore.QThread):
         self.done.emit(len(items))
 
 
+class UpdateCheckWorker(QtCore.QThread):
+    found = QtCore.Signal(dict)
+
+    def run(self):
+        try:
+            info = updater.check(VERSION)
+            if info:
+                self.found.emit(info)
+        except Exception as e:
+            print("update check:", e)
+
+
+class UpdateDownloadWorker(QtCore.QThread):
+    progress = QtCore.Signal(int)
+    done = QtCore.Signal(str)
+    error = QtCore.Signal(str)
+
+    def __init__(self, url, dest, size):
+        super().__init__()
+        self.url = url
+        self.dest = dest
+        self.size = size
+
+    def run(self):
+        try:
+            ok = updater.download(self.url, self.dest, self.size,
+                                  lambda g, t: self.progress.emit(int(g * 100 / t)))
+            if ok:
+                self.done.emit(self.dest)
+            else:
+                self.error.emit("Downloaded file failed verification.")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 # --------------------------------------------------------------------------- #
 # icons
 # --------------------------------------------------------------------------- #
@@ -423,6 +460,12 @@ class WinWall(QtWidgets.QMainWindow):
         if last and os.path.isfile(last):
             self.apply(last)
 
+        # check for a newer release (packaged builds only)
+        if getattr(sys, "frozen", False):
+            self._upd_check = UpdateCheckWorker()
+            self._upd_check.found.connect(self._show_update_banner)
+            self._upd_check.start()
+
     # ---- UI ----
     def _build_ui(self):
         central = QtWidgets.QWidget()
@@ -430,6 +473,24 @@ class WinWall(QtWidgets.QMainWindow):
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(20, 18, 20, 16)
         root.setSpacing(14)
+
+        # update banner (hidden until a newer release is found)
+        self.banner = QtWidgets.QFrame()
+        self.banner.setObjectName("banner")
+        bl = QtWidgets.QHBoxLayout(self.banner)
+        bl.setContentsMargins(14, 8, 10, 8)
+        self.banner_label = QtWidgets.QLabel()
+        self.banner_label.setObjectName("bannerlabel")
+        self.update_btn = QtWidgets.QPushButton("Update now")
+        self.update_btn.setObjectName("primary")
+        self.update_btn.clicked.connect(self._do_update)
+        self.banner_dismiss = QtWidgets.QPushButton("Later")
+        self.banner_dismiss.clicked.connect(self.banner.hide)
+        bl.addWidget(self.banner_label, 1)
+        bl.addWidget(self.update_btn)
+        bl.addWidget(self.banner_dismiss)
+        self.banner.hide()
+        root.addWidget(self.banner)
 
         header = QtWidgets.QHBoxLayout()
         title = QtWidgets.QLabel("WinWall")
@@ -558,6 +619,8 @@ class WinWall(QtWidgets.QMainWindow):
             QLabel#subtitle {{ color: #8a8f9c; font-size: 12px; }}
             QLabel#status {{ color: #8a8f9c; font-size: 12px; }}
             QLabel#links {{ color: #8a8f9c; font-size: 12px; }}
+            QFrame#banner {{ background: #23202f; border: 1px solid {ACCENT}; border-radius: 10px; }}
+            QLabel#bannerlabel {{ color: #e8e9ee; font-weight: 600; }}
             QPushButton {{
                 background: #262833; color: #e8e9ee; border: none;
                 padding: 9px 16px; border-radius: 9px; font-weight: 600;
@@ -757,6 +820,48 @@ class WinWall(QtWidgets.QMainWindow):
         set_startup(on)
         self.settings["startup_disabled"] = not on
         save_settings(self.settings)
+
+    # ---- one-click self-update ----
+    def _show_update_banner(self, info):
+        self._update_info = info
+        self.banner_label.setText("A new version of WinWall (%s) is available." % info["version"])
+        self.update_btn.setEnabled(True)
+        self.update_btn.setText("Update now")
+        self.banner_dismiss.show()
+        self.banner.show()
+
+    def _do_update(self):
+        info = getattr(self, "_update_info", None)
+        if not info:
+            return
+        self.update_btn.setEnabled(False)
+        self.banner_dismiss.hide()
+        self.banner_label.setText("Downloading %s..." % info["version"])
+        dest = sys.executable + ".new"
+        self._dlu = UpdateDownloadWorker(info["url"], dest, info.get("size", 0))
+        self._dlu.progress.connect(
+            lambda p: self.banner_label.setText("Downloading %s...  %d%%" % (info["version"], p)))
+        self._dlu.done.connect(self._install_update)
+        self._dlu.error.connect(self._update_failed)
+        self._dlu.start()
+
+    def _install_update(self, new_exe):
+        self.banner_label.setText("Installing update... WinWall will restart.")
+        QtWidgets.QApplication.processEvents()
+        try:
+            updater.apply_and_relaunch(new_exe, sys.executable)
+        except Exception as e:
+            self._update_failed(str(e))
+            return
+        self.engine.stop()
+        self.tray.hide()
+        QtCore.QTimer.singleShot(400, QtWidgets.QApplication.quit)
+
+    def _update_failed(self, msg):
+        self.update_btn.setEnabled(True)
+        self.update_btn.setText("Retry")
+        self.banner_dismiss.show()
+        self.banner_label.setText("Update failed (%s). You can retry." % msg)
 
     # ---- browse (the shop) ----
     def do_search(self):
