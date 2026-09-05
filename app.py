@@ -110,39 +110,44 @@ def migrate_old_data():
 # --------------------------------------------------------------------------- #
 # launch on Windows startup (HKCU Run key)
 # --------------------------------------------------------------------------- #
-RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-RUN_NAME = "WinWall"
+STARTUP_LNK = os.path.join(os.environ.get("APPDATA", ""),
+                           r"Microsoft\Windows\Start Menu\Programs\Startup\WinWall.lnk")
 
 
-def _startup_command():
-    # --tray => launch minimized to tray and just run the last wallpaper.
+def _startup_target():
     if getattr(sys, "frozen", False):
-        return '"%s" --tray' % sys.executable
+        return sys.executable, "--tray"
     pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    if not os.path.exists(pyw):
-        pyw = sys.executable
-    return '"%s" "%s" --tray' % (pyw, os.path.join(APP_DIR, "app.py"))
+    exe = pyw if os.path.exists(pyw) else sys.executable
+    return exe, '"%s" --tray' % os.path.join(APP_DIR, "app.py")
 
 
 def startup_enabled():
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
-            val, _ = winreg.QueryValueEx(k, RUN_NAME)
-            return bool(val)
-    except Exception:
-        return False
+    return os.path.exists(STARTUP_LNK)
 
 
 def set_startup(enable):
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
-            if enable:
-                winreg.SetValueEx(k, RUN_NAME, 0, winreg.REG_SZ, _startup_command())
-            else:
-                try:
-                    winreg.DeleteValue(k, RUN_NAME)
-                except FileNotFoundError:
-                    pass
+        # remove any legacy Run-key entry so there is only one startup method
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Run", 0,
+                                winreg.KEY_SET_VALUE) as k:
+                winreg.DeleteValue(k, "WinWall")
+        except Exception:
+            pass
+        if enable:
+            import win32com.client
+            target, args = _startup_target()
+            sh = win32com.client.Dispatch("WScript.Shell")
+            lnk = sh.CreateShortcut(STARTUP_LNK)
+            lnk.TargetPath = target
+            lnk.Arguments = args
+            lnk.WorkingDirectory = os.path.dirname(target)
+            lnk.IconLocation = target + ",0"
+            lnk.Save()
+        elif os.path.exists(STARTUP_LNK):
+            os.remove(STARTUP_LNK)
     except Exception as e:
         print("startup error:", e)
 
@@ -390,6 +395,10 @@ class WinWall(QtWidgets.QMainWindow):
         detect_screen_width()
         migrate_old_data()
         self.settings = load_settings()
+        # Self-configure launch-on-startup in the user's real context, unless
+        # they explicitly turned it off (heals sandboxed/virtualized setups).
+        if not startup_enabled() and not self.settings.get("startup_disabled"):
+            set_startup(True)
         self.mpv = engine.find_mpv()
         self.engine = engine.WallpaperEngine(
             pause_on_battery=self.settings.get("pause_on_battery", False),
@@ -534,7 +543,7 @@ class WinWall(QtWidgets.QMainWindow):
         bottom.addWidget(self.batt_chk)
         self.startup_chk = QtWidgets.QCheckBox("Launch on startup")
         self.startup_chk.setChecked(startup_enabled())
-        self.startup_chk.toggled.connect(set_startup)
+        self.startup_chk.toggled.connect(self._toggle_startup)
         bottom.addWidget(self.startup_chk)
         bottom.addStretch(1)
         self.status = QtWidgets.QLabel("No wallpaper running")
@@ -742,6 +751,11 @@ class WinWall(QtWidgets.QMainWindow):
     def _toggle_battery(self, on):
         self.engine.pause_on_battery = on
         self.settings["pause_on_battery"] = on
+        save_settings(self.settings)
+
+    def _toggle_startup(self, on):
+        set_startup(on)
+        self.settings["startup_disabled"] = not on
         save_settings(self.settings)
 
     # ---- browse (the shop) ----

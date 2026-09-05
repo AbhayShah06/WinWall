@@ -40,6 +40,9 @@ def main():
         "--hidden-import", "PySide6.QtMultimedia",
         "--hidden-import", "PySide6.QtMultimediaWidgets",
         "--hidden-import", "PySide6.QtNetwork",
+        "--hidden-import", "win32com.client",
+        "--hidden-import", "pythoncom",
+        "--hidden-import", "pywintypes",
         os.path.join(HERE, "app.py"),
     ]
     print("Running PyInstaller...")
