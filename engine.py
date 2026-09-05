@@ -18,7 +18,6 @@ import sys
 import json
 import time
 import ctypes
-import tempfile
 import threading
 import subprocess
 
@@ -40,46 +39,6 @@ OFFSCREEN = -32000
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_NOACTIVATE = 0x08000000
 GWL_STYLE = -16
-STM_SETIMAGE = 0x0172
-IMAGE_BITMAP = 0
-SS_BITMAP = 0x0E
-SS_REALSIZECONTROL = 0x40
-UNLOAD_DELAY = 2.5  # seconds the desktop must stay covered before unloading mpv
-
-_gdip_token = None
-
-
-def _gdip_start():
-    global _gdip_token
-    if _gdip_token is not None:
-        return
-    class _GSI(ctypes.Structure):
-        _fields_ = [("GdiplusVersion", ctypes.c_uint32),
-                    ("DebugEventCallback", ctypes.c_void_p),
-                    ("SuppressBackgroundThread", ctypes.c_int),
-                    ("SuppressExternalCodecs", ctypes.c_int)]
-    token = ctypes.c_void_p()
-    si = _GSI()
-    si.GdiplusVersion = 1
-    ctypes.windll.gdiplus.GdiplusStartup(ctypes.byref(token), ctypes.byref(si), None)
-    _gdip_token = token
-
-
-def _load_hbitmap(path):
-    """Load a PNG/JPG file into a GDI HBITMAP (via GDI+)."""
-    try:
-        _gdip_start()
-        img = ctypes.c_void_p()
-        if ctypes.windll.gdiplus.GdipCreateBitmapFromFile(ctypes.c_wchar_p(path),
-                                                          ctypes.byref(img)) != 0:
-            return None
-        hbmp = ctypes.c_void_p()
-        ctypes.windll.gdiplus.GdipCreateHBITMAPFromBitmap(img, ctypes.byref(hbmp),
-                                                          ctypes.c_uint(0xFF000000))
-        ctypes.windll.gdiplus.GdipDisposeImage(img)
-        return hbmp.value
-    except Exception:
-        return None
 
 _HINST = None
 _ATOM = 0
@@ -105,53 +64,7 @@ def _set_dpi_awareness():
     _dpi_set = True
 
 
-_frame_bmps = {}  # frame-window hwnd -> HBITMAP of the last captured frame
-
-_gdi = ctypes.windll.gdi32
-_gdi.CreateCompatibleDC.restype = ctypes.c_void_p
-_gdi.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
-_gdi.SelectObject.restype = ctypes.c_void_p
-_gdi.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-_gdi.DeleteDC.argtypes = [ctypes.c_void_p]
-_gdi.SetStretchBltMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
-_gdi.StretchBlt.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                            ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
-                            ctypes.c_int, ctypes.c_int, ctypes.c_uint]
-_gdi.GetObjectW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
-
-
-class _BITMAP(ctypes.Structure):
-    _fields_ = [("bmType", ctypes.c_long), ("bmWidth", ctypes.c_long),
-                ("bmHeight", ctypes.c_long), ("bmWidthBytes", ctypes.c_long),
-                ("bmPlanes", ctypes.c_ushort), ("bmBitsPixel", ctypes.c_ushort),
-                ("bmBits", ctypes.c_void_p)]
-
-
-def _paint_frame(hwnd, hbmp):
-    hdc, ps = win32gui.BeginPaint(hwnd)
-    try:
-        rect = win32gui.GetClientRect(hwnd)
-        cw, ch = rect[2] - rect[0], rect[3] - rect[1]
-        bm = _BITMAP()
-        _gdi.GetObjectW(ctypes.c_void_p(hbmp), ctypes.sizeof(bm), ctypes.byref(bm))
-        memdc = _gdi.CreateCompatibleDC(ctypes.c_void_p(hdc))
-        old = _gdi.SelectObject(memdc, ctypes.c_void_p(hbmp))
-        _gdi.SetStretchBltMode(ctypes.c_void_p(hdc), 4)  # HALFTONE
-        _gdi.StretchBlt(ctypes.c_void_p(hdc), 0, 0, cw, ch, memdc, 0, 0,
-                        bm.bmWidth or cw, bm.bmHeight or ch, 0x00CC0020)  # SRCCOPY
-        _gdi.SelectObject(memdc, old)
-        _gdi.DeleteDC(memdc)
-    finally:
-        win32gui.EndPaint(hwnd, ps)
-
-
 def _wnd_proc(hwnd, msg, wparam, lparam):
-    if msg == win32con.WM_PAINT and hwnd in _frame_bmps:
-        try:
-            _paint_frame(hwnd, _frame_bmps[hwnd])
-        except Exception:
-            pass
-        return 0
     if msg == win32con.WM_ERASEBKGND:
         return 1
     return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
@@ -363,14 +276,10 @@ def resolve_video(path):
 
 # --- engine -----------------------------------------------------------------
 class WallpaperEngine:
-    def __init__(self, pause_on_battery=False, poll_interval=1.0, log=print,
-                 unload_when_covered=True):
+    def __init__(self, pause_on_battery=False, poll_interval=1.0, log=print):
         self.pause_on_battery = pause_on_battery
         self.poll_interval = poll_interval
         self.log = log
-        # Free mpv's RAM (~150MB) while the desktop is covered; a captured
-        # freeze-frame is shown so the return to the desktop is instant.
-        self.unload_when_covered = unload_when_covered
         self._thread = None
         self._stop = threading.Event()
         self._current = None
@@ -416,36 +325,43 @@ class WallpaperEngine:
         for i, (hmon, rect) in enumerate(_enum_monitors()):
             l, t, r, b = rect
             w, h = r - l, b - t
-            # Freeze-frame window: a STATIC child of the wallpaper host that shows
-            # a captured frame while mpv is unloaded. Created top-level then
-            # reparented (same reason the video window is), hidden while playing.
-            frame_hwnd = win32gui.CreateWindowEx(
+            # 1) our own borderless top-level window, created off-screen
+            hwnd = win32gui.CreateWindowEx(
                 WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, _ATOM, None, win32con.WS_POPUP,
                 OFFSCREEN, OFFSCREEN, w, h, 0, 0, _HINST, None)
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOWNOACTIVATE)
+            # 2) embed mpv into it
+            pipe = r"\\.\pipe\winwall-%d" % i
             try:
-                win32gui.SetParent(frame_hwnd, host)
-                win32gui.SetWindowLong(frame_hwnd, GWL_STYLE, win32con.WS_CHILD)
-                win32gui.SetWindowPos(frame_hwnd, win32con.HWND_BOTTOM, l - host_l, t - host_t,
-                                      w, h, win32con.SWP_NOACTIVATE | win32con.SWP_FRAMECHANGED)
-                win32gui.ShowWindow(frame_hwnd, win32con.SW_HIDE)
-            except Exception:
-                pass
-            p = {"monitor": (hmon, rect), "index": i,
-                 "host": host, "host_l": host_l, "host_t": host_t,
-                 "mpv_exe": mpv_exe, "video": video,
-                 "pipe_name": r"\\.\pipe\winwall-%d" % i,
-                 "frame_hwnd": frame_hwnd,
-                 "frame_path": os.path.join(tempfile.gettempdir(), "winwall-frame-%d.png" % i),
-                 "frame_bmp": None, "video_hwnd": 0, "proc": None, "pipe": None,
-                 "loaded": False, "paused": False, "covered_since": None}
-            if self._start_video(p):
-                players.append(p)
-                self.log(f"[engine] monitor {hmon}: {w}x{h} embedded")
-            else:
-                try:
-                    win32gui.DestroyWindow(frame_hwnd)
-                except Exception:
-                    pass
+                proc = _launch_mpv(mpv_exe, video, hwnd, pipe)
+            except Exception as e:
+                self.log(f"[engine] mpv launch failed: {e}")
+                continue
+            # wait until mpv creates its render child inside our window
+            for _ in range(40):
+                if win32gui.FindWindowEx(hwnd, 0, None, None):
+                    break
+                if self._stop.is_set():
+                    break
+                time.sleep(0.1)
+            # 3) reparent behind the icons and size to the monitor
+            try:
+                win32gui.SetParent(hwnd, host)
+                win32gui.SetWindowLong(hwnd, GWL_STYLE, win32con.WS_CHILD | win32con.WS_VISIBLE)
+                win32gui.SetWindowPos(
+                    hwnd, win32con.HWND_BOTTOM, l - host_l, t - host_t, w, h,
+                    win32con.SWP_NOACTIVATE | win32con.SWP_FRAMECHANGED | win32con.SWP_SHOWWINDOW)
+            except Exception as e:
+                self.log(f"[engine] reparent failed: {e}")
+            handle = _ipc_connect(pipe)
+            # enforce fill-the-screen (crop overflow) at runtime -- the launch
+            # flag alone doesn't always take once the window is reparented/resized
+            _ipc_send(handle, ["set_property", "panscan", 1.0])
+            _ipc_send(handle, ["set_property", "keepaspect", True])
+            players.append({"proc": proc, "hwnd": hwnd, "monitor": (hmon, rect),
+                            "pipe": handle, "paused": False})
+            self.log(f"[engine] monitor {hmon}: {w}x{h} embedded"
+                     f"{'' if handle else ' (no ipc)'}")
 
         if not players:
             self.log("[engine] nothing started")
@@ -455,132 +371,27 @@ class WallpaperEngine:
         try:
             while not self._stop.is_set():
                 win32gui.PumpWaitingMessages()
-                self._update_power(players)
+                self._update_pause(players)
                 time.sleep(self.poll_interval)
         finally:
             for p in players:
-                if p.get("pipe"):
-                    _ipc_send(p["pipe"], ["quit"])
+                _ipc_send(p["pipe"], ["quit"])
             time.sleep(0.2)
             for p in players:
                 try:
-                    if p.get("proc"):
-                        p["proc"].terminate()
+                    p["proc"].terminate()
                 except Exception:
                     pass
-                for key in ("video_hwnd", "frame_hwnd"):
-                    try:
-                        if p.get(key):
-                            win32gui.DestroyWindow(p[key])
-                    except Exception:
-                        pass
-                bmp = _frame_bmps.pop(p.get("frame_hwnd"), None)
-                if bmp:
-                    try:
-                        win32gui.DeleteObject(bmp)
-                    except Exception:
-                        pass
+                try:
+                    win32gui.DestroyWindow(p["hwnd"])
+                except Exception:
+                    pass
             self.log("[engine] stopped")
 
-    def _start_video(self, p):
-        """Create a fresh window, embed mpv, reparent it behind the icons."""
-        hmon, rect = p["monitor"]
-        l, t, r, b = rect
-        w, h = r - l, b - t
-        host, host_l, host_t = p["host"], p["host_l"], p["host_t"]
-        hwnd = win32gui.CreateWindowEx(
-            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, _ATOM, None, win32con.WS_POPUP,
-            OFFSCREEN, OFFSCREEN, w, h, 0, 0, _HINST, None)
-        win32gui.ShowWindow(hwnd, win32con.SW_SHOWNOACTIVATE)
-        try:
-            proc = _launch_mpv(p["mpv_exe"], p["video"], hwnd, p["pipe_name"])
-        except Exception as e:
-            self.log(f"[engine] mpv launch failed: {e}")
-            try:
-                win32gui.DestroyWindow(hwnd)
-            except Exception:
-                pass
-            return False
-        for _ in range(40):
-            if win32gui.FindWindowEx(hwnd, 0, None, None):
-                break
-            if self._stop.is_set():
-                break
-            time.sleep(0.1)
-        try:
-            win32gui.SetParent(hwnd, host)
-            win32gui.SetWindowLong(hwnd, GWL_STYLE, win32con.WS_CHILD | win32con.WS_VISIBLE)
-            win32gui.SetWindowPos(
-                hwnd, win32con.HWND_BOTTOM, l - host_l, t - host_t, w, h,
-                win32con.SWP_NOACTIVATE | win32con.SWP_FRAMECHANGED | win32con.SWP_SHOWWINDOW)
-        except Exception as e:
-            self.log(f"[engine] reparent failed: {e}")
-        p["video_hwnd"] = hwnd
-        p["proc"] = proc
-        p["pipe"] = _ipc_connect(p["pipe_name"])
-        _ipc_send(p["pipe"], ["set_property", "panscan", 1.0])
-        _ipc_send(p["pipe"], ["set_property", "keepaspect", True])
-        p["loaded"] = True
-        p["paused"] = False
-        try:  # video is up: hide the freeze-frame beneath it
-            win32gui.ShowWindow(p["frame_hwnd"], win32con.SW_HIDE)
-        except Exception:
-            pass
-        return True
-
-    def _freeze(self, p):
-        """Capture the current frame, show it, then unload mpv to free RAM."""
-        try:
-            if os.path.exists(p["frame_path"]):
-                os.remove(p["frame_path"])
-        except Exception:
-            pass
-        _ipc_send(p["pipe"], ["screenshot-to-file", p["frame_path"], "video"])
-        for _ in range(20):
-            if os.path.exists(p["frame_path"]) and os.path.getsize(p["frame_path"]) > 0:
-                break
-            time.sleep(0.05)
-        hbmp = _load_hbitmap(p["frame_path"]) if os.path.exists(p["frame_path"]) else None
-        if hbmp:
-            old = _frame_bmps.get(p["frame_hwnd"])
-            _frame_bmps[p["frame_hwnd"]] = hbmp
-            try:
-                win32gui.ShowWindow(p["frame_hwnd"], win32con.SW_SHOWNOACTIVATE)
-                win32gui.SetWindowPos(
-                    p["frame_hwnd"], win32con.HWND_BOTTOM, 0, 0, 0, 0,
-                    win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
-                win32gui.InvalidateRect(p["frame_hwnd"], None, True)
-                win32gui.UpdateWindow(p["frame_hwnd"])
-            except Exception:
-                pass
-            if old:
-                try:
-                    win32gui.DeleteObject(old)
-                except Exception:
-                    pass
-        _ipc_send(p["pipe"], ["quit"])
-        time.sleep(0.15)
-        try:
-            if p.get("proc"):
-                p["proc"].terminate()
-        except Exception:
-            pass
-        try:
-            if p.get("video_hwnd"):
-                win32gui.DestroyWindow(p["video_hwnd"])
-        except Exception:
-            pass
-        p["video_hwnd"] = 0
-        p["proc"] = None
-        p["pipe"] = None
-        p["loaded"] = False
-        p["paused"] = False
-        self.log(f"[engine] monitor {p['monitor'][0]}: unloaded mpv (freed RAM), freeze-frame shown")
-
-    def _update_power(self, players):
+    def _update_pause(self, players):
         if os.environ.get("WINWALL_NOPAUSE"):
-            return
-        battery_off = self.pause_on_battery and on_battery()
+            return  # testing: keep playing even when covered
+        batt = self.pause_on_battery and on_battery()
         fg = win32gui.GetForegroundWindow()
         fg_mon = 0
         if fg:
@@ -588,21 +399,10 @@ class WallpaperEngine:
                 fg_mon = int(win32api.MonitorFromWindow(fg, win32con.MONITOR_DEFAULTTONEAREST))
             except Exception:
                 fg_mon = 0
-        now = time.time()
         for p in players:
             hmon, rect = p["monitor"]
-            covered = self.unload_when_covered and (hmon == fg_mon) and _covers(fg, rect)
-            if covered:
-                if p["covered_since"] is None:
-                    p["covered_since"] = now
-            else:
-                p["covered_since"] = None
-            off = battery_off or (covered and (now - (p["covered_since"] or now)) >= UNLOAD_DELAY)
-            if p["loaded"]:
-                if off:
-                    self._freeze(p)
-                elif covered != p["paused"]:  # covered but within grace: pause to save CPU
-                    p["paused"] = covered
-                    _ipc_send(p["pipe"], ["set_property", "pause", covered])
-            elif not off:
-                self._start_video(p)
+            covered = (hmon == fg_mon) and _covers(fg, rect)
+            want = batt or covered
+            if want != p["paused"]:
+                p["paused"] = want
+                _ipc_send(p["pipe"], ["set_property", "pause", want])
