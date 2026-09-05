@@ -16,7 +16,7 @@ import urllib.request
 
 REPO = "AbhayShah06/WinWall-dist"   # public releases-only repo (code stays private)
 _CREATE_NO_WINDOW = 0x08000000
-_DETACHED = 0x00000008
+_NEW_GROUP = 0x00000200
 
 
 def _parts(v):
@@ -103,5 +103,5 @@ def apply_and_relaunch(new_exe, target_exe):
     )
     with open(bat, "w") as f:
         f.write(script)
-    subprocess.Popen(["cmd", "/c", bat], creationflags=_CREATE_NO_WINDOW | _DETACHED,
+    subprocess.Popen(["cmd", "/c", bat], creationflags=_CREATE_NO_WINDOW | _NEW_GROUP,
                      close_fds=True)
