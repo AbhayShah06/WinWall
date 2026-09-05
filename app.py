@@ -344,7 +344,17 @@ def placeholder_icon(name):
     return QtGui.QIcon(pm)
 
 
+def _res(name):
+    base = getattr(sys, "_MEIPASS", APP_DIR)
+    return os.path.join(base, "assets", name)
+
+
 def app_icon():
+    p = _res("icon.png")
+    if os.path.exists(p):
+        ic = QtGui.QIcon(p)
+        if not ic.isNull():
+            return ic
     pm = QtGui.QPixmap(64, 64)
     pm.fill(QtCore.Qt.transparent)
     p = QtGui.QPainter(pm)

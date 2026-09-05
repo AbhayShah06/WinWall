@@ -34,6 +34,8 @@ def main():
         "--noconfirm", "--clean",
         "--onefile", "--windowed",
         "--name", "WinWall",
+        "--icon", os.path.join(HERE, "assets", "icon.ico"),
+        "--add-data", "%s%sassets" % (os.path.join(HERE, "assets"), os.pathsep),
         "--add-binary", "%s%s." % (mpv, os.pathsep),   # mpv.exe at bundle root
         "--hidden-import", "PySide6.QtMultimedia",
         "--hidden-import", "PySide6.QtMultimediaWidgets",
