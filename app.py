@@ -867,7 +867,13 @@ SINGLETON = "WinWall_singleton"
 
 
 def main():
+    try:  # so Windows uses our icon on the taskbar (not a generic one)
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AbhayShah.WinWall")
+    except Exception:
+        pass
     app = QtWidgets.QApplication(sys.argv)
+    app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(False)
 
     # Single instance: if WinWall is already running, tell it to show its window
