@@ -19,12 +19,9 @@ import subprocess
 
 from PySide6 import QtCore, QtGui, QtNetwork, QtWidgets
 
-try:
-    from PySide6.QtMultimedia import QMediaPlayer
-    from PySide6.QtMultimediaWidgets import QVideoWidget
-    HAVE_MEDIA = True
-except Exception:
-    HAVE_MEDIA = False
+# QtMultimedia (used only for hover previews in Browse) pulls in a heavy media
+# backend, so it is imported lazily on first use -- see WinWall._ensure_media.
+# Sessions that stay in the tray never load it.
 
 import engine
 import shop
@@ -44,7 +41,7 @@ SETTINGS = os.path.join(DATA_DIR, "settings.json")
 VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".gif")
 CREATE_NO_WINDOW = 0x08000000
 ACCENT = "#7c5cff"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 
 # --------------------------------------------------------------------------- #
@@ -62,6 +59,19 @@ def save_settings(data):
     try:
         with open(SETTINGS, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def trim_memory():
+    """Ask Windows to trim our working set back to its minimum. Called when the
+    app goes idle in the tray so the footprint drops (pages fault back in on the
+    next interaction). This is what well-behaved background apps do."""
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.SetProcessWorkingSetSize(k32.GetCurrentProcess(),
+                                     ctypes.c_size_t(-1), ctypes.c_size_t(-1))
     except Exception:
         pass
 
@@ -446,6 +456,8 @@ class WinWall(QtWidgets.QMainWindow):
         self._dl_worker = None
         self._browse_items = {}
         self._browse_loaded = False
+        self._media_ok = None        # None = QtMultimedia not probed yet
+        self._library_loaded = False  # library grid built lazily on first show
 
         self.setWindowTitle("WinWall")
         self.setWindowIcon(app_icon())
@@ -454,7 +466,8 @@ class WinWall(QtWidgets.QMainWindow):
         self._apply_style()
         self._build_tray()
 
-        self.reload_library()
+        # The library grid (and its thumbnails) is only built when the window is
+        # actually shown -- a startup/tray session never pays for it.
 
         last = self.settings.get("last_wallpaper")
         if last and os.path.isfile(last):
@@ -580,21 +593,17 @@ class WinWall(QtWidgets.QMainWindow):
         self.tabs.addTab(br, "Browse")
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
-        # hover preview (muted, looping video streamed over the tile)
-        if HAVE_MEDIA:
-            self.browse_grid.setMouseTracking(True)
-            self.browse_grid.viewport().setMouseTracking(True)
-            self.browse_grid.itemEntered.connect(self._hover_preview)
-            self.browse_grid.viewport().installEventFilter(self)
-            self.browse_grid.verticalScrollBar().valueChanged.connect(
-                lambda _: self._hide_preview())
-            self._preview = QVideoWidget(self.browse_grid.viewport())
-            self._preview.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
-            self._preview.hide()
-            self._player = QMediaPlayer(self)
-            self._player.setVideoOutput(self._preview)
-            self._player.setLoops(QMediaPlayer.Infinite)
-            self._preview_item = None
+        # Hover preview: wire the cheap signals now, but build the (heavy)
+        # QtMultimedia player lazily on first hover -- see _ensure_media.
+        self._preview = None
+        self._player = None
+        self._preview_item = None
+        self.browse_grid.setMouseTracking(True)
+        self.browse_grid.viewport().setMouseTracking(True)
+        self.browse_grid.itemEntered.connect(self._hover_preview)
+        self.browse_grid.viewport().installEventFilter(self)
+        self.browse_grid.verticalScrollBar().valueChanged.connect(
+            lambda _: self._hide_preview())
 
         # bottom bar
         bottom = QtWidgets.QHBoxLayout()
@@ -736,6 +745,7 @@ class WinWall(QtWidgets.QMainWindow):
         self.engine.stop()
         self.status.setText("No wallpaper running")
         self._highlight(None)
+        QtCore.QTimer.singleShot(1000, trim_memory)
 
     def add_wallpaper(self):
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -939,12 +949,34 @@ class WinWall(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.warning(self, "Download failed", msg)
 
     # ---- hover preview ----
+    def _ensure_media(self):
+        """Import QtMultimedia and build the preview player on first hover.
+        Deferred so tray/startup sessions never load the media backend."""
+        if self._player is not None:
+            return True
+        if self._media_ok is False:
+            return False
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer
+            from PySide6.QtMultimediaWidgets import QVideoWidget
+        except Exception:
+            self._media_ok = False
+            return False
+        self._preview = QVideoWidget(self.browse_grid.viewport())
+        self._preview.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self._preview.hide()
+        self._player = QMediaPlayer(self)
+        self._player.setVideoOutput(self._preview)
+        self._player.setLoops(QMediaPlayer.Infinite)
+        self._media_ok = True
+        return True
+
     def _hover_preview(self, item):
-        if not HAVE_MEDIA or item is None:
+        if item is None or item is self._preview_item:
             return
         data = item.data(QtCore.Qt.UserRole) or {}
         url = data.get("preview_url") or data.get("video_url")
-        if not url or item is self._preview_item:
+        if not url or not self._ensure_media():
             return
         self._preview_item = item
         rect = self.browse_grid.visualItemRect(item)
@@ -956,25 +988,37 @@ class WinWall(QtWidgets.QMainWindow):
         self._player.play()
 
     def _hide_preview(self):
-        if not HAVE_MEDIA:
+        if not self._player:
             return
         self._preview_item = None
         self._player.stop()
         self._preview.hide()
 
     def eventFilter(self, obj, ev):
-        if (HAVE_MEDIA and obj is self.browse_grid.viewport()
+        if (self._player and obj is self.browse_grid.viewport()
                 and ev.type() == QtCore.QEvent.Leave):
             self._hide_preview()
         return super().eventFilter(obj, ev)
 
     # ---- lifecycle ----
+    def showEvent(self, e):
+        # Build the library grid the first time the window is actually shown.
+        if not self._library_loaded:
+            self._library_loaded = True
+            self.reload_library()
+        super().showEvent(e)
+
     def closeEvent(self, e):
+        # Hiding to the tray: stop any preview playback so nothing decodes while
+        # the window is not visible.
+        self._hide_preview()
         if self.tray.isVisible():
             e.ignore()
             self.hide()
             self.tray.showMessage("WinWall", "Still running in the tray.",
                                   QtWidgets.QSystemTrayIcon.Information, 2000)
+            # give RAM back now that the window is gone
+            QtCore.QTimer.singleShot(1500, trim_memory)
 
     def _quit(self):
         self.engine.stop()
@@ -1030,6 +1074,10 @@ def main():
     start_tray = ("--tray" in sys.argv) and bool(w.settings.get("last_wallpaper"))
     if not start_tray:
         w.show()
+    else:
+        # Started hidden in the tray: once the wallpaper is up, trim the working
+        # set so an idle startup session sits small.
+        QtCore.QTimer.singleShot(6000, trim_memory)
     return app.exec()
 
 

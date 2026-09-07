@@ -206,8 +206,11 @@ def _launch_mpv(mpv_exe, video, hwnd, pipe):
         "--panscan=1.0", "--no-osc", "--no-border",
         "--no-input-default-bindings", "--input-vo-keyboard=no",
         "--cursor-autohide=no", "--no-config", "--really-quiet", "--idle=no",
-        # keep memory lean: no big read-ahead cache for a short local loop
-        "--cache=no", "--demuxer-max-bytes=16MiB", "--demuxer-max-back-bytes=8MiB",
+        # keep memory lean: no read-ahead cache for a short local loop, tiny
+        # demuxer buffers (a loop never seeks backward), and let the decoder
+        # render directly into its own buffers to avoid extra frame copies.
+        "--cache=no", "--demuxer-max-bytes=8MiB", "--demuxer-max-back-bytes=2MiB",
+        "--vd-lavc-dr=yes",
         f"--input-ipc-server={pipe}",
     ]
     return subprocess.Popen(args, creationflags=CREATE_NO_WINDOW)
@@ -315,14 +318,48 @@ class WallpaperEngine:
             return
         _register_class()
 
+        host, players = self._spawn(video, mpv_exe)
+        if not players:
+            self.log("[engine] nothing started")
+            return
+        self.log(f"[engine] running on {len(players)} monitor(s)")
+
+        last_health = time.time()
+        try:
+            while not self._stop.is_set():
+                win32gui.PumpWaitingMessages()
+                self._update_pause(players)
+                # Self-heal: if Explorer restarts/crashes (Windows updates, a
+                # GPU driver reset, or a manual restart), the desktop layer we
+                # parented into is destroyed and takes the video with it; mpv can
+                # also exit. Detect either and re-embed so the wallpaper never
+                # silently disappears until the next reboot.
+                if time.time() - last_health > 3:
+                    last_health = time.time()
+                    if not self._healthy(host, players):
+                        self.log("[engine] host/player lost -- re-embedding")
+                        self._teardown(players)
+                        host, players = self._spawn(video, mpv_exe)
+                        if not players and not self._stop.is_set():
+                            time.sleep(2)  # desktop not ready yet; retry once
+                            host, players = self._spawn(video, mpv_exe)
+                time.sleep(self.poll_interval)
+        finally:
+            self._teardown(players)
+            self.log("[engine] stopped")
+
+    def _spawn(self, video, mpv_exe):
+        """Create a borderless window per monitor, embed mpv, reparent behind
+        the icons. Returns (host_hwnd, players)."""
         host = get_wallpaper_host()
         if not host:
             self.log("[engine] no desktop host window")
-            return
+            return 0, []
         host_l, host_t, _, _ = win32gui.GetWindowRect(host)
-
         players = []
         for i, (hmon, rect) in enumerate(_enum_monitors()):
+            if self._stop.is_set():
+                break
             l, t, r, b = rect
             w, h = r - l, b - t
             # 1) our own borderless top-level window, created off-screen
@@ -336,6 +373,10 @@ class WallpaperEngine:
                 proc = _launch_mpv(mpv_exe, video, hwnd, pipe)
             except Exception as e:
                 self.log(f"[engine] mpv launch failed: {e}")
+                try:
+                    win32gui.DestroyWindow(hwnd)
+                except Exception:
+                    pass
                 continue
             # wait until mpv creates its render child inside our window
             for _ in range(40):
@@ -362,31 +403,38 @@ class WallpaperEngine:
                             "pipe": handle, "paused": False})
             self.log(f"[engine] monitor {hmon}: {w}x{h} embedded"
                      f"{'' if handle else ' (no ipc)'}")
+        return host, players
 
-        if not players:
-            self.log("[engine] nothing started")
-            return
-        self.log(f"[engine] running on {len(players)} monitor(s)")
-
+    def _healthy(self, host, players):
+        """True while the desktop host and every embedded player still exist."""
         try:
-            while not self._stop.is_set():
-                win32gui.PumpWaitingMessages()
-                self._update_pause(players)
-                time.sleep(self.poll_interval)
-        finally:
-            for p in players:
-                _ipc_send(p["pipe"], ["quit"])
-            time.sleep(0.2)
-            for p in players:
-                try:
-                    p["proc"].terminate()
-                except Exception:
-                    pass
-                try:
-                    win32gui.DestroyWindow(p["hwnd"])
-                except Exception:
-                    pass
-            self.log("[engine] stopped")
+            if not host or not win32gui.IsWindow(host):
+                return False
+        except Exception:
+            return False
+        for p in players:
+            try:
+                if p["proc"].poll() is not None:      # mpv exited
+                    return False
+                if not win32gui.IsWindow(p["hwnd"]):   # our window was destroyed
+                    return False
+            except Exception:
+                return False
+        return True
+
+    def _teardown(self, players):
+        for p in players:
+            _ipc_send(p["pipe"], ["quit"])
+        time.sleep(0.2)
+        for p in players:
+            try:
+                p["proc"].terminate()
+            except Exception:
+                pass
+            try:
+                win32gui.DestroyWindow(p["hwnd"])
+            except Exception:
+                pass
 
     def _update_pause(self, players):
         if os.environ.get("WINWALL_NOPAUSE"):
