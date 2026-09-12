@@ -11,15 +11,17 @@ new ones. Built to stay light on the battery.
   covers the desktop (nothing to show, so nothing to render). Optional
   pause-on-battery too.
 - **My Library.** Your saved wallpapers as a grid; click one to apply it live.
-  Add your own `.mp4` / `.webm` / etc.
+  Add your own `.mp4` / `.webm` / etc. with the file picker or drag and drop.
 - **Browse.** Genre chips (anime, nature, city, space, cyberpunk, cars, games,
-  abstract, animals) plus free-text search. Hover a tile for a live preview,
-  click to download the size that matches your screen and apply it. Handy links
+  abstract, animals) plus free-text search. Browse visual thumbnails, then click
+  to download the size that matches your screen and apply it. Handy links
   to a few wallpaper sites are included too.
 - **System tray.** Closing the window keeps it running in the tray. Remembers
   your last wallpaper.
 - **Launch on startup** (opens straight to the tray and restores your last
   wallpaper, no window).
+- **Automatic display recovery.** Rebuilds the wallpaper when a monitor is
+  connected, disconnected, rotated, or changes resolution.
 
 ## How it works
 

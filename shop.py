@@ -5,6 +5,7 @@ Parses listing pages into items with a thumbnail and a direct HD mp4 URL, and
 downloads them on demand. For personal use.
 """
 
+import os
 import re
 import urllib.parse
 import urllib.request
@@ -30,6 +31,35 @@ def http_bytes(url):
     req = urllib.request.Request(url, headers={"User-Agent": _UA, "Referer": _BASE + "/"})
     with urllib.request.urlopen(req, timeout=90) as r:
         return r.read()
+
+
+def download(url, dest, progress=None):
+    """Stream a wallpaper to disk without holding the whole video in RAM."""
+    tmp = dest + ".part"
+    req = urllib.request.Request(url, headers={"User-Agent": _UA, "Referer": _BASE + "/"})
+    try:
+        with urllib.request.urlopen(req, timeout=90) as r:
+            total = int(r.headers.get("Content-Length", 0))
+            got = 0
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(tmp, "wb") as f:
+                while True:
+                    chunk = r.read(262144)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    got += len(chunk)
+                    if progress and total:
+                        progress(got, total)
+        if not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
+            raise IOError("The wallpaper service returned an empty file.")
+        os.replace(tmp, dest)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _parse(html, cap=48):
@@ -60,4 +90,9 @@ def genre(name):
 
 
 def search(query):
-    return _parse(_get_text("%s/?s=%s" % (_BASE, urllib.parse.quote(query))))
+    html = _get_text("%s/search?q=%s" % (_BASE, urllib.parse.quote(query)))
+    # MotionBgs fills an empty search page with trending items. Do not present
+    # those unrelated suggestions as if they matched the user's query.
+    if re.search(r"No\s+Results\s+Found", html, re.IGNORECASE):
+        return []
+    return _parse(html)

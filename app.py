@@ -16,6 +16,7 @@ import json
 import shutil
 import winreg
 import subprocess
+import urllib.parse
 
 from PySide6 import QtCore, QtGui, QtNetwork, QtWidgets
 
@@ -41,7 +42,8 @@ SETTINGS = os.path.join(DATA_DIR, "settings.json")
 VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".gif")
 CREATE_NO_WINDOW = 0x08000000
 ACCENT = "#7c5cff"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
+SELFTEST = "--selftest" in sys.argv or bool(os.environ.get("WINWALL_SELFTEST"))
 
 
 # --------------------------------------------------------------------------- #
@@ -56,11 +58,18 @@ def load_settings():
 
 
 def save_settings(data):
+    tmp = SETTINGS + ".tmp"
     try:
-        with open(SETTINGS, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, SETTINGS)
     except Exception:
-        pass
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def trim_memory():
@@ -273,6 +282,7 @@ def safe_filename(name):
 class DownloadWorker(QtCore.QThread):
     done = QtCore.Signal(str)
     error = QtCore.Signal(str)
+    progress = QtCore.Signal(int)
 
     def __init__(self, url, dest):
         super().__init__()
@@ -281,10 +291,8 @@ class DownloadWorker(QtCore.QThread):
 
     def run(self):
         try:
-            data = shop.http_bytes(self.url)
-            os.makedirs(os.path.dirname(self.dest), exist_ok=True)
-            with open(self.dest, "wb") as f:
-                f.write(data)
+            shop.download(self.url, self.dest,
+                          lambda g, t: self.progress.emit(int(g * 100 / t)))
             self.done.emit(self.dest)
         except Exception as e:
             self.error.emit(str(e))
@@ -337,15 +345,16 @@ class UpdateDownloadWorker(QtCore.QThread):
     done = QtCore.Signal(str)
     error = QtCore.Signal(str)
 
-    def __init__(self, url, dest, size):
+    def __init__(self, url, dest, size, digest=""):
         super().__init__()
         self.url = url
         self.dest = dest
         self.size = size
+        self.digest = digest
 
     def run(self):
         try:
-            ok = updater.download(self.url, self.dest, self.size,
+            ok = updater.download(self.url, self.dest, self.size, self.digest,
                                   lambda g, t: self.progress.emit(int(g * 100 / t)))
             if ok:
                 self.done.emit(self.dest)
@@ -444,7 +453,7 @@ class WinWall(QtWidgets.QMainWindow):
         self.settings = load_settings()
         # Self-configure launch-on-startup in the user's real context, unless
         # they explicitly turned it off (heals sandboxed/virtualized setups).
-        if not startup_enabled() and not self.settings.get("startup_disabled"):
+        if not SELFTEST and not self.settings.get("startup_disabled"):
             set_startup(True)
         self.mpv = engine.find_mpv()
         self.engine = engine.WallpaperEngine(
@@ -453,6 +462,8 @@ class WinWall(QtWidgets.QMainWindow):
         self._apply_worker = None
         self._thumb_worker = None
         self._search_worker = None
+        self._browse_workers = set()
+        self._browse_request = 0
         self._dl_worker = None
         self._browse_items = {}
         self._browse_loaded = False
@@ -461,6 +472,7 @@ class WinWall(QtWidgets.QMainWindow):
 
         self.setWindowTitle("WinWall")
         self.setWindowIcon(app_icon())
+        self.setAcceptDrops(True)
         self.resize(980, 660)
         self._build_ui()
         self._apply_style()
@@ -470,11 +482,11 @@ class WinWall(QtWidgets.QMainWindow):
         # actually shown -- a startup/tray session never pays for it.
 
         last = self.settings.get("last_wallpaper")
-        if last and os.path.isfile(last):
+        if not SELFTEST and last and os.path.isfile(last):
             self.apply(last)
 
         # check for a newer release (packaged builds only)
-        if getattr(sys, "frozen", False):
+        if getattr(sys, "frozen", False) and not SELFTEST:
             self._upd_check = UpdateCheckWorker()
             self._upd_check.found.connect(self._show_update_banner)
             self._upd_check.start()
@@ -517,7 +529,9 @@ class WinWall(QtWidgets.QMainWindow):
         header.addLayout(tbox)
         header.addStretch(1)
         credit = QtWidgets.QLabel(
-            'by <a href="https://x.com/AbhayShah06"><font color="#8a8f9c">@AbhayShah06</font></a>')
+            'Built by <b>Abhay Shah</b> &nbsp; '
+            '<a href="https://x.com/AbhayShah06"><font color="#8a8f9c">X</font></a> · '
+            '<a href="https://www.linkedin.com/in/abhay-shah1/"><font color="#8a8f9c">LinkedIn</font></a>')
         credit.setObjectName("links")
         credit.setToolTip("Made by Abhay Shah")
         credit.setOpenExternalLinks(True)
@@ -576,8 +590,12 @@ class WinWall(QtWidgets.QMainWindow):
         self.search_btn = QtWidgets.QPushButton("Search")
         self.search_btn.setObjectName("primary")
         self.search_btn.clicked.connect(self.do_search)
+        self.web_search_btn = QtWidgets.QPushButton("Search Pexels")
+        self.web_search_btn.setToolTip("Find downloadable stock videos on Pexels")
+        self.web_search_btn.clicked.connect(self._search_web)
         srow.addWidget(self.search_edit, 1)
         srow.addWidget(self.search_btn)
+        srow.addWidget(self.web_search_btn)
         bv.addLayout(srow)
         links = QtWidgets.QLabel(
             'Or browse the web: '
@@ -598,6 +616,11 @@ class WinWall(QtWidgets.QMainWindow):
         self._preview = None
         self._player = None
         self._preview_item = None
+        self._pending_preview_item = None
+        self._preview_timer = QtCore.QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(450)
+        self._preview_timer.timeout.connect(self._start_hover_preview)
         self.browse_grid.setMouseTracking(True)
         self.browse_grid.viewport().setMouseTracking(True)
         self.browse_grid.itemEntered.connect(self._hover_preview)
@@ -753,19 +776,34 @@ class WinWall(QtWidgets.QMainWindow):
             "Videos (*.mp4 *.webm *.mkv *.mov *.avi *.m4v *.gif)")
         if not files:
             return
+        self._import_wallpapers(files)
+
+    def _import_wallpapers(self, files):
         os.makedirs(LIBRARY_DIR, exist_ok=True)
         last = None
+        failed = []
         for f in files:
+            if not f.lower().endswith(VIDEO_EXTS):
+                continue
             dst = os.path.join(LIBRARY_DIR, os.path.basename(f))
             try:
                 if os.path.abspath(f) != os.path.abspath(dst):
+                    stem, ext = os.path.splitext(dst)
+                    n = 2
+                    while os.path.exists(dst):
+                        dst = "%s (%d)%s" % (stem, n, ext)
+                        n += 1
                     shutil.copy2(f, dst)
                 last = dst
             except Exception as e:
                 print("copy failed:", e)
+                failed.append(os.path.basename(f))
         self.reload_library()
         if last:
             self.apply(last)
+        if failed:
+            QtWidgets.QMessageBox.warning(
+                self, "Some files were not added", "\n".join(failed))
 
     def _library_menu(self, pos):
         it = self.grid.itemAt(pos)
@@ -848,7 +886,8 @@ class WinWall(QtWidgets.QMainWindow):
         self.banner_dismiss.hide()
         self.banner_label.setText("Downloading %s..." % info["version"])
         dest = sys.executable + ".new"
-        self._dlu = UpdateDownloadWorker(info["url"], dest, info.get("size", 0))
+        self._dlu = UpdateDownloadWorker(info["url"], dest, info.get("size", 0),
+                                         info.get("digest", ""))
         self._dlu.progress.connect(
             lambda p: self.banner_label.setText("Downloading %s...  %d%%" % (info["version"], p)))
         self._dlu.done.connect(self._install_update)
@@ -880,6 +919,11 @@ class WinWall(QtWidgets.QMainWindow):
             return
         self._start_browse("search", q, 'Searching "%s"...' % q)
 
+    def _search_web(self):
+        q = self.search_edit.text().strip() or "live wallpaper"
+        url = "https://www.pexels.com/search/videos/%s/" % urllib.parse.quote(q)
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
+
     def _load_genre(self, name):
         self._start_browse("genre", name, "Loading %s..." % name.title())
 
@@ -889,11 +933,22 @@ class WinWall(QtWidgets.QMainWindow):
         self._browse_items = {}
         self.search_btn.setEnabled(False)
         self.status.setText(status_text)
-        self._search_worker = MotionWorker(kind, arg)
-        self._search_worker.result.connect(self._search_result)
-        self._search_worker.error.connect(self._search_error)
-        self._search_worker.done.connect(self._search_done)
-        self._search_worker.start()
+        self._browse_request += 1
+        request = self._browse_request
+        worker = MotionWorker(kind, arg)
+        self._search_worker = worker
+        self._browse_workers.add(worker)
+        worker.result.connect(
+            lambda item, thumb, r=request: self._search_result(item, thumb)
+            if r == self._browse_request else None)
+        worker.error.connect(
+            lambda msg, r=request: self._search_error(msg)
+            if r == self._browse_request else None)
+        worker.done.connect(
+            lambda n, r=request: self._search_done(n)
+            if r == self._browse_request else None)
+        worker.finished.connect(lambda w=worker: self._browse_workers.discard(w))
+        worker.start()
 
     def _on_tab_changed(self, idx):
         self._hide_preview()
@@ -913,7 +968,7 @@ class WinWall(QtWidgets.QMainWindow):
     def _search_done(self, n):
         self.search_btn.setEnabled(True)
         self.status.setText("%d results, click one to download & apply" % n if n
-                            else "No results. Try another search.")
+                            else "No built-in results. Try Search Pexels.")
 
     def _search_error(self, msg):
         self.search_btn.setEnabled(True)
@@ -926,6 +981,8 @@ class WinWall(QtWidgets.QMainWindow):
         if not item:
             return
         name = safe_filename(item.get("desc") or item["title"])
+        if item.get("id"):
+            name += " - " + safe_filename(str(item["id"]))
         dest = os.path.join(LIBRARY_DIR, name + ".mp4")
         if os.path.exists(dest) and os.path.getsize(dest) > 0:
             self._apply_downloaded(dest)
@@ -933,6 +990,8 @@ class WinWall(QtWidgets.QMainWindow):
         self.status.setText("Downloading...")
         self.browse_grid.setEnabled(False)
         self._dl_worker = DownloadWorker(item["video_url"], dest)
+        self._dl_worker.progress.connect(
+            lambda p: self.status.setText("Downloading... %d%%" % p))
         self._dl_worker.done.connect(self._apply_downloaded)
         self._dl_worker.error.connect(self._download_error)
         self._dl_worker.start()
@@ -974,6 +1033,13 @@ class WinWall(QtWidgets.QMainWindow):
     def _hover_preview(self, item):
         if item is None or item is self._preview_item:
             return
+        self._pending_preview_item = item
+        self._preview_timer.start()
+
+    def _start_hover_preview(self):
+        item = self._pending_preview_item
+        if item is None:
+            return
         data = item.data(QtCore.Qt.UserRole) or {}
         url = data.get("preview_url") or data.get("video_url")
         if not url or not self._ensure_media():
@@ -988,6 +1054,8 @@ class WinWall(QtWidgets.QMainWindow):
         self._player.play()
 
     def _hide_preview(self):
+        self._preview_timer.stop()
+        self._pending_preview_item = None
         if not self._player:
             return
         self._preview_item = None
@@ -999,6 +1067,19 @@ class WinWall(QtWidgets.QMainWindow):
                 and ev.type() == QtCore.QEvent.Leave):
             self._hide_preview()
         return super().eventFilter(obj, ev)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls() and any(
+                u.isLocalFile() and u.toLocalFile().lower().endswith(VIDEO_EXTS)
+                for u in e.mimeData().urls()):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        files = [u.toLocalFile() for u in e.mimeData().urls()
+                 if u.isLocalFile() and u.toLocalFile().lower().endswith(VIDEO_EXTS)]
+        if files:
+            self._import_wallpapers(files)
+            e.acceptProposedAction()
 
     # ---- lifecycle ----
     def showEvent(self, e):
@@ -1026,7 +1107,7 @@ class WinWall(QtWidgets.QMainWindow):
         QtWidgets.QApplication.quit()
 
 
-SINGLETON = "WinWall_singleton"
+SINGLETON = "WinWall_singleton_selftest" if SELFTEST else "WinWall_singleton"
 
 
 def main():
@@ -1065,13 +1146,13 @@ def main():
             w.activateWindow()
     server.newConnection.connect(_on_second_launch)
 
-    if os.environ.get("WINWALL_SELFTEST"):
+    if SELFTEST:
         w.show()
-        QtCore.QTimer.singleShot(1500, app.quit)
+        QtCore.QTimer.singleShot(1500, w._quit)
         return app.exec()
     # Launched at startup with --tray (and a saved wallpaper): stay in the tray
     # and just run the last wallpaper. Otherwise show the window.
-    start_tray = ("--tray" in sys.argv) and bool(w.settings.get("last_wallpaper"))
+    start_tray = "--tray" in sys.argv
     if not start_tray:
         w.show()
     else:

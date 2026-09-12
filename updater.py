@@ -10,6 +10,7 @@ relaunches. Downloads are programmatic so no Mark-of-the-Web / SmartScreen.
 import os
 import re
 import json
+import hashlib
 import tempfile
 import subprocess
 import urllib.request
@@ -41,29 +42,34 @@ def check(current_version):
     for a in data.get("assets", []):
         if a.get("name", "").lower().endswith(".exe"):
             return {"version": tag, "url": a["browser_download_url"],
-                    "size": int(a.get("size", 0)), "notes": data.get("body", "") or ""}
+                    "size": int(a.get("size", 0)), "digest": a.get("digest", ""),
+                    "notes": data.get("body", "") or ""}
     return None
 
 
-def download(url, dest, expected_size=0, progress=None):
-    """Download to dest; verify size. Returns True on a complete, valid file."""
+def download(url, dest, expected_size=0, expected_digest="", progress=None):
+    """Download to dest; verify its size and GitHub-provided SHA-256 digest."""
     tmp = dest + ".part"
     req = urllib.request.Request(url, headers={"User-Agent": "WinWall"})
     with urllib.request.urlopen(req, timeout=60) as r:
         total = int(r.headers.get("Content-Length", expected_size or 0))
         got = 0
+        digest = hashlib.sha256()
         with open(tmp, "wb") as f:
             while True:
                 chunk = r.read(262144)
                 if not chunk:
                     break
                 f.write(chunk)
+                digest.update(chunk)
                 got += len(chunk)
                 if progress and total:
                     progress(got, total)
     # verify: non-trivial size, and matches expected/content-length if known
     size = os.path.getsize(tmp)
-    if size < 1_000_000 or (expected_size and size != expected_size):
+    wanted = expected_digest.removeprefix("sha256:").lower()
+    bad_digest = bool(wanted) and digest.hexdigest().lower() != wanted
+    if size < 1_000_000 or (expected_size and size != expected_size) or bad_digest:
         try:
             os.remove(tmp)
         except Exception:

@@ -336,8 +336,10 @@ class WallpaperEngine:
                 # silently disappears until the next reboot.
                 if time.time() - last_health > 3:
                     last_health = time.time()
-                    if not self._healthy(host, players):
-                        self.log("[engine] host/player lost -- re-embedding")
+                    layout_changed = self._layout_changed(players)
+                    if layout_changed or not self._healthy(host, players):
+                        reason = "display layout changed" if layout_changed else "host/player lost"
+                        self.log(f"[engine] {reason} -- re-embedding")
                         self._teardown(players)
                         host, players = self._spawn(video, mpv_exe)
                         if not players and not self._stop.is_set():
@@ -405,6 +407,15 @@ class WallpaperEngine:
                      f"{'' if handle else ' (no ipc)'}")
         return host, players
 
+    def _layout_changed(self, players):
+        """Detect monitor attach/detach, rotation, and resolution changes."""
+        try:
+            current = sorted(_enum_monitors())
+            running = sorted(p["monitor"] for p in players)
+            return current != running
+        except Exception:
+            return False
+
     def _healthy(self, host, players):
         """True while the desktop host and every embedded player still exist."""
         try:
@@ -429,6 +440,11 @@ class WallpaperEngine:
         for p in players:
             try:
                 p["proc"].terminate()
+            except Exception:
+                pass
+            try:
+                if p["pipe"]:
+                    p["pipe"].Close()
             except Exception:
                 pass
             try:

@@ -1,12 +1,16 @@
 # Python
 __pycache__/
 *.pyc
+.venv/
+.venv-build/
+.build-python/
 
 # personal / generated / large
 settings.json
 library/
 thumbnails/
 samples/
+resources/bin/
 *.log
 
 # PyInstaller build output
