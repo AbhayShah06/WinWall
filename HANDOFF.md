@@ -1,6 +1,6 @@
 # WinWall audit and updater handoff
 
-Last updated: 2026-09-17 (GitHub synchronization in progress)
+Last updated: 2026-09-17 (implementation, verification, and GitHub release complete)
 
 ## User-reported issue
 
@@ -63,8 +63,6 @@ The current helper also deletes the old `.bak` executable only a few seconds aft
 
 ## Work remaining
 
-- Push the 1.0.4 source commit to `AbhayShah06/WinWall`.
-- Publish `dist/WinWall.exe` as the 1.0.4 release in `AbhayShah06/WinWall-dist`.
 - Replace the installed 1.0.3 executable only if the user requests installation; it was intentionally left untouched during development.
 
 ## Implemented changes
@@ -95,3 +93,10 @@ The current helper also deletes the old `.bak` executable only a few seconds aft
 - Python syntax compilation passes for all source/build modules.
 - `git diff --check` passes; only line-ending normalization warnings are reported.
 - PyInstaller warnings are limited to expected non-Windows optional modules, deliberately excluded QtMultimedia preview modules, and optional `win32com.gen_py`.
+
+## GitHub synchronization
+
+- Source commit `c9b1756` was pushed to `AbhayShah06/WinWall` on `main`.
+- Release `v1.0.4` was published to `AbhayShah06/WinWall-dist` and marked latest.
+- GitHub reports the uploaded `WinWall.exe` as 95,229,088 bytes with digest `sha256:eba917af4b29e4d5bb73d4206cb5c31ab8b5e0349c1b511005627276317569e9`, matching the verified local build.
+- Release URL: https://github.com/AbhayShah06/WinWall-dist/releases/tag/v1.0.4
