@@ -51,12 +51,15 @@ class DownloadTests(unittest.TestCase):
     def test_update_accepts_matching_digest(self):
         data = b"x" * 1_100_000
         digest = "sha256:" + hashlib.sha256(data).hexdigest()
+        phases = []
         with tempfile.TemporaryDirectory() as folder:
             dest = os.path.join(folder, "WinWall.exe.new")
             with mock.patch("urllib.request.urlopen", return_value=FakeResponse(data)):
-                ok = updater.download("https://example.test/update", dest, len(data), digest)
+                ok = updater.download("https://example.test/update", dest, len(data), digest,
+                                      status=phases.append)
             self.assertTrue(ok)
             self.assertTrue(os.path.exists(dest))
+            self.assertEqual(phases, ["downloading", "verifying", "ready"])
 
     def test_update_rejects_wrong_digest(self):
         data = b"x" * 1_100_000
@@ -68,6 +71,50 @@ class DownloadTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertFalse(os.path.exists(dest))
             self.assertFalse(os.path.exists(dest + ".part"))
+
+    def test_update_cleans_partial_file_after_network_error(self):
+        class BrokenResponse(FakeResponse):
+            def read(self, size=-1):
+                if self._stream.tell():
+                    raise OSError("connection lost")
+                return self._stream.read(min(size, 262144))
+
+        data = b"x" * 1_100_000
+        with tempfile.TemporaryDirectory() as folder:
+            dest = os.path.join(folder, "WinWall.exe.new")
+            with mock.patch("urllib.request.urlopen", return_value=BrokenResponse(data)):
+                with self.assertRaises(OSError):
+                    updater.download("https://example.test/update", dest)
+            self.assertFalse(os.path.exists(dest + ".part"))
+
+    @unittest.skipUnless(os.name == "nt", "update helper is Windows-only")
+    def test_relaunch_resets_pyinstaller_environment_and_preserves_backup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            target = os.path.join(folder, "WinWall.exe")
+            new = target + ".new"
+            with open(target, "wb") as f:
+                f.write(b"old")
+            with open(new, "wb") as f:
+                f.write(b"new")
+            with mock.patch("updater.subprocess.Popen") as popen:
+                updater.apply_and_relaunch(new, target, process_id=4321)
+
+            args, kwargs = popen.call_args
+            helper = args[0][2]
+            try:
+                with open(helper, encoding="mbcs") as f:
+                    script = f.read()
+                self.assertEqual(kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+                self.assertIn('set "PYINSTALLER_RESET_ENVIRONMENT=1"', script)
+                self.assertIn('tasklist /fi "pid eq 4321"', script)
+                self.assertIn('start ""', script)
+                # The old executable is removed only before the swap. There is
+                # no post-launch backup deletion; startup performs that cleanup.
+                self.assertLess(script.find("del \"%s.bak\"" % target),
+                                script.find('start ""'))
+            finally:
+                if os.path.exists(helper):
+                    os.remove(helper)
 
 
 if __name__ == "__main__":

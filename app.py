@@ -42,7 +42,7 @@ SETTINGS = os.path.join(DATA_DIR, "settings.json")
 VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".gif")
 CREATE_NO_WINDOW = 0x08000000
 ACCENT = "#7c5cff"
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 SELFTEST = "--selftest" in sys.argv or bool(os.environ.get("WINWALL_SELFTEST"))
 
 
@@ -342,6 +342,7 @@ class UpdateCheckWorker(QtCore.QThread):
 
 class UpdateDownloadWorker(QtCore.QThread):
     progress = QtCore.Signal(int)
+    phase = QtCore.Signal(str)
     done = QtCore.Signal(str)
     error = QtCore.Signal(str)
 
@@ -355,7 +356,8 @@ class UpdateDownloadWorker(QtCore.QThread):
     def run(self):
         try:
             ok = updater.download(self.url, self.dest, self.size, self.digest,
-                                  lambda g, t: self.progress.emit(int(g * 100 / t)))
+                                  lambda g, t: self.progress.emit(int(g * 100 / t)),
+                                  self.phase.emit)
             if ok:
                 self.done.emit(self.dest)
             else:
@@ -502,18 +504,26 @@ class WinWall(QtWidgets.QMainWindow):
         # update banner (hidden until a newer release is found)
         self.banner = QtWidgets.QFrame()
         self.banner.setObjectName("banner")
-        bl = QtWidgets.QHBoxLayout(self.banner)
+        bl = QtWidgets.QGridLayout(self.banner)
         bl.setContentsMargins(14, 8, 10, 8)
         self.banner_label = QtWidgets.QLabel()
         self.banner_label.setObjectName("bannerlabel")
+        self.update_progress = QtWidgets.QProgressBar()
+        self.update_progress.setObjectName("updateprogress")
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setValue(0)
+        self.update_progress.setTextVisible(True)
+        self.update_progress.hide()
         self.update_btn = QtWidgets.QPushButton("Update now")
         self.update_btn.setObjectName("primary")
         self.update_btn.clicked.connect(self._do_update)
         self.banner_dismiss = QtWidgets.QPushButton("Later")
         self.banner_dismiss.clicked.connect(self.banner.hide)
-        bl.addWidget(self.banner_label, 1)
-        bl.addWidget(self.update_btn)
-        bl.addWidget(self.banner_dismiss)
+        bl.addWidget(self.banner_label, 0, 0)
+        bl.addWidget(self.update_btn, 0, 1)
+        bl.addWidget(self.banner_dismiss, 0, 2)
+        bl.addWidget(self.update_progress, 1, 0, 1, 3)
+        bl.setColumnStretch(0, 1)
         self.banner.hide()
         root.addWidget(self.banner)
 
@@ -652,14 +662,22 @@ class WinWall(QtWidgets.QMainWindow):
             QLabel#status {{ color: #8a8f9c; font-size: 12px; }}
             QLabel#links {{ color: #8a8f9c; font-size: 12px; }}
             QFrame#banner {{ background: #23202f; border: 1px solid {ACCENT}; border-radius: 10px; }}
-            QLabel#bannerlabel {{ color: #e8e9ee; font-weight: 600; }}
+            QLabel#bannerlabel {{ background: transparent; color: #e8e9ee; font-weight: 600; }}
+            QProgressBar#updateprogress {{
+                background: #101117; color: white; border: 1px solid #343746;
+                border-radius: 5px; height: 10px; text-align: center;
+                font-size: 10px; font-weight: 700;
+            }}
+            QProgressBar#updateprogress::chunk {{ background: {ACCENT}; border-radius: 4px; }}
             QPushButton {{
                 background: #262833; color: #e8e9ee; border: none;
                 padding: 9px 16px; border-radius: 9px; font-weight: 600;
             }}
             QPushButton:hover {{ background: #30323f; }}
+            QPushButton:disabled {{ background: #34303f; color: #9a96a8; }}
             QPushButton#primary {{ background: {ACCENT}; color: white; }}
             QPushButton#primary:hover {{ background: #8f72ff; }}
+            QPushButton#primary:disabled {{ background: #4a416d; color: #b8b2c8; }}
             QPushButton#chip {{ background: #1b1d26; color: #cfd2db; padding: 6px 13px;
                                 border-radius: 14px; font-weight: 600; }}
             QPushButton#chip:hover {{ background: {ACCENT}; color: white; }}
@@ -873,6 +891,9 @@ class WinWall(QtWidgets.QMainWindow):
     def _show_update_banner(self, info):
         self._update_info = info
         self.banner_label.setText("A new version of WinWall (%s) is available." % info["version"])
+        self.update_progress.hide()
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setValue(0)
         self.update_btn.setEnabled(True)
         self.update_btn.setText("Update now")
         self.banner_dismiss.show()
@@ -883,22 +904,47 @@ class WinWall(QtWidgets.QMainWindow):
         if not info:
             return
         self.update_btn.setEnabled(False)
+        self.update_btn.setText("Updating...")
         self.banner_dismiss.hide()
-        self.banner_label.setText("Downloading %s..." % info["version"])
+        self.banner_label.setText("Downloading WinWall %s..." % info["version"])
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setValue(0)
+        self.update_progress.setFormat("Downloading  %p%")
+        self.update_progress.show()
         dest = sys.executable + ".new"
         self._dlu = UpdateDownloadWorker(info["url"], dest, info.get("size", 0),
                                          info.get("digest", ""))
-        self._dlu.progress.connect(
-            lambda p: self.banner_label.setText("Downloading %s...  %d%%" % (info["version"], p)))
+        self._dlu.progress.connect(self._update_progress_changed)
+        self._dlu.phase.connect(self._update_phase_changed)
         self._dlu.done.connect(self._install_update)
         self._dlu.error.connect(self._update_failed)
         self._dlu.start()
 
+    def _update_progress_changed(self, progress):
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setValue(progress)
+        self.update_progress.setFormat("Downloading  %d%%" % progress)
+
+    def _update_phase_changed(self, phase):
+        version = getattr(self, "_update_info", {}).get("version", "")
+        if phase == "verifying":
+            self.banner_label.setText("Verifying WinWall %s..." % version)
+            self.update_progress.setRange(0, 0)
+            self.update_progress.setFormat("")
+        elif phase == "ready":
+            self.banner_label.setText("Update verified. Preparing to install...")
+            self.update_progress.setRange(0, 100)
+            self.update_progress.setValue(100)
+            self.update_progress.setFormat("Verified")
+
     def _install_update(self, new_exe):
         self.banner_label.setText("Installing update... WinWall will restart.")
+        self.update_btn.setText("Restarting...")
+        self.update_progress.setRange(0, 0)
+        self.update_progress.setFormat("")
         QtWidgets.QApplication.processEvents()
         try:
-            updater.apply_and_relaunch(new_exe, sys.executable)
+            updater.apply_and_relaunch(new_exe, sys.executable, os.getpid())
         except Exception as e:
             self._update_failed(str(e))
             return
@@ -910,6 +956,7 @@ class WinWall(QtWidgets.QMainWindow):
         self.update_btn.setEnabled(True)
         self.update_btn.setText("Retry")
         self.banner_dismiss.show()
+        self.update_progress.hide()
         self.banner_label.setText("Update failed (%s). You can retry." % msg)
 
     # ---- browse (the shop) ----
@@ -1136,6 +1183,10 @@ def main():
 
     w = WinWall()
     w._singleton_server = server  # keep a reference alive
+    if getattr(sys, "frozen", False):
+        # Reaching this point proves the updated executable completed its
+        # bootloader/Python/UI startup, so its rollback copy is no longer needed.
+        updater.cleanup_backup(sys.executable)
 
     def _on_second_launch():
         conn = server.nextPendingConnection()
