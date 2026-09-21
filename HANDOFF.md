@@ -1,6 +1,6 @@
 # WinWall audit and updater handoff
 
-Last updated: 2026-09-20 (1.0.3-to-1.0.4 bootstrap failure confirmed; bridge release in progress)
+Last updated: 2026-09-20 (1.0.5 bridge verified and published)
 
 ## User-reported issue
 
@@ -16,8 +16,8 @@ Last updated: 2026-09-20 (1.0.3-to-1.0.4 bootstrap failure confirmed; bridge rel
 - The exact error is emitted by PyInstaller's one-file bootloader parent-process validation.
 - PyInstaller 6.22.1 had a confirmed Windows false-positive for executables launched through a directory junction or symlink; the upstream fix landed for 6.22.2. The installed path and all of its parent directories are ordinary directories, so that bug is not the trigger here.
 - The repository is clean at the start of this work.
-- The installed executable is version 1.0.3 and its SHA-256 hash exactly matches `dist/WinWall.exe`; the update download and swap did not corrupt it.
-- A clean launch of the installed executable in `--selftest` mode exits successfully with code 0.
+- Before the failed automatic restart, the installed 1.0.3 executable and release build matched exactly. The failed-restart attempt successfully swapped in a valid 1.0.4 executable; only its inherited-environment launch failed.
+- Clean launches of the installed 1.0.4 executable and packaged 1.0.5 bridge exit successfully in self-test mode.
 - The Startup-folder shortcut resolves correctly to `%LOCALAPPDATA%\WinWall\WinWall.exe --tray`. An earlier blank-target reading was an artifact of inspecting the shortcut without access to its target, not a broken shortcut.
 
 ## Audit scope
@@ -63,9 +63,7 @@ The current helper also deletes the old `.bak` executable only a few seconds aft
 
 ## Work remaining
 
-- Publish a bridge release that can be launched by the unfixed 1.0.3 updater.
-- Reproduce the legacy updater handoff in isolation and verify that the bridge build starts automatically.
-- The installed executable has already been swapped to 1.0.4 by the failed-restart update attempt; do not overwrite it during isolated bridge testing.
+- The installed executable is valid 1.0.4. Reopen it normally and use its fixed updater to move to latest 1.0.5, or install the 1.0.5 executable directly if explicitly requested.
 
 ## Implemented changes
 
@@ -102,6 +100,10 @@ The current helper also deletes the old `.bak` executable only a few seconds aft
 - Release `v1.0.4` was published to `AbhayShah06/WinWall-dist` and marked latest.
 - GitHub reports the uploaded `WinWall.exe` as 95,229,088 bytes with digest `sha256:eba917af4b29e4d5bb73d4206cb5c31ab8b5e0349c1b511005627276317569e9`, matching the verified local build.
 - Release URL: https://github.com/AbhayShah06/WinWall-dist/releases/tag/v1.0.4
+- Source commit `3218410` was pushed to `AbhayShah06/WinWall` on `main` for the bridge release.
+- Release `v1.0.5` was published to `AbhayShah06/WinWall-dist` and marked latest.
+- GitHub reports the 1.0.5 asset as 95,202,186 bytes with digest `sha256:621e56a62be7faeaefa60c3eff2b64963ce3bd074c49a18d8294de1823d1cf62`, matching the tested local bridge build.
+- Latest release URL: https://github.com/AbhayShah06/WinWall-dist/releases/tag/v1.0.5
 
 ## 2026-09-20 bootstrap finding
 
