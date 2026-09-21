@@ -42,7 +42,7 @@ SETTINGS = os.path.join(DATA_DIR, "settings.json")
 VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".gif")
 CREATE_NO_WINDOW = 0x08000000
 ACCENT = "#7c5cff"
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 SELFTEST = "--selftest" in sys.argv or bool(os.environ.get("WINWALL_SELFTEST"))
 
 

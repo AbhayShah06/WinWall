@@ -1,0 +1,8 @@
+# One-time compatibility toolchain for the v1.0.5 bridge release.
+#
+# WinWall 1.0.3's updater does not reset PyInstaller's inherited environment.
+# PyInstaller changed one-file restart behavior in 6.9, so a modern build cannot
+# be auto-launched by that legacy updater. Build only the bridge release with
+# this file; normal releases must use requirements-build.txt.
+-r requirements.txt
+PyInstaller==6.8.0

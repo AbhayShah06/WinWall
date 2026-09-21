@@ -1,6 +1,6 @@
 # WinWall audit and updater handoff
 
-Last updated: 2026-09-17 (implementation, verification, and GitHub release complete)
+Last updated: 2026-09-20 (1.0.3-to-1.0.4 bootstrap failure confirmed; bridge release in progress)
 
 ## User-reported issue
 
@@ -63,7 +63,9 @@ The current helper also deletes the old `.bak` executable only a few seconds aft
 
 ## Work remaining
 
-- Replace the installed 1.0.3 executable only if the user requests installation; it was intentionally left untouched during development.
+- Publish a bridge release that can be launched by the unfixed 1.0.3 updater.
+- Reproduce the legacy updater handoff in isolation and verify that the bridge build starts automatically.
+- The installed executable has already been swapped to 1.0.4 by the failed-restart update attempt; do not overwrite it during isolated bridge testing.
 
 ## Implemented changes
 
@@ -100,3 +102,22 @@ The current helper also deletes the old `.bak` executable only a few seconds aft
 - Release `v1.0.4` was published to `AbhayShah06/WinWall-dist` and marked latest.
 - GitHub reports the uploaded `WinWall.exe` as 95,229,088 bytes with digest `sha256:eba917af4b29e4d5bb73d4206cb5c31ab8b5e0349c1b511005627276317569e9`, matching the verified local build.
 - Release URL: https://github.com/AbhayShah06/WinWall-dist/releases/tag/v1.0.4
+
+## 2026-09-20 bootstrap finding
+
+- A real update initiated by installed WinWall 1.0.3 downloaded and swapped in the verified 1.0.4 executable, but automatic restart still showed `Security validation failure: parent process has different executable!`.
+- The screenshot's old text-only progress presentation confirms that the updater performing the handoff was 1.0.3. The restart fix inside 1.0.4 cannot execute because the PyInstaller bootloader fails before Python starts.
+- The installed target is now a valid 1.0.4 executable (95,229,088 bytes); only its inherited-environment launch failed. A clean/manual launch is expected to work.
+- PyInstaller changed restart semantics in 6.9: a restarted one-file executable must receive `PYINSTALLER_RESET_ENVIRONMENT=1`. The legacy 1.0.3 updater cannot be retroactively changed to set it.
+- Resolution: build a one-time 1.0.5 bridge with the pre-6.9 bootloader behavior, while retaining the fixed 1.0.5 Python updater code. Once users reach 1.0.5, future releases can return to the current PyInstaller toolchain because the updater now resets the environment correctly.
+- An isolated PyInstaller 6.8.0 environment was created successfully with Python 3.12.14, PySide6 6.11.2, and the current contrib hooks. `requirements-bridge.txt` records this one-time build toolchain; normal builds remain pinned to PyInstaller 6.22.2.
+
+## 1.0.5 bridge verification
+
+- Version 1.0.5 was built successfully with the one-time PyInstaller 6.8.0 bridge toolchain.
+- File size: 95,202,186 bytes.
+- SHA-256: `621E56A62BE7FAEAEFA60C3EFF2B64963CE3BD074C49A18D8294DE1823D1CF62`.
+- Direct packaged self-test exited successfully.
+- Legacy-path integration test passed using a disposable PyInstaller 6.22.2 parent and the exact pre-1.0.4 batch helper: swap observed, 1.0.5 bridge process observed starting, self-test observed exiting, no security dialog/process remained, and no `.new` or `.bak` file was stranded.
+- Future-path integration test passed using a PyInstaller 6.8.0 parent with the fixed updater and a PyInstaller 6.22.2 child: swap, child start, clean exit, and backup cleanup were all observed.
+- Seven unit tests and Python syntax compilation pass.
