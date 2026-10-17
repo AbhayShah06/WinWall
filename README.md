@@ -57,6 +57,10 @@ python build_exe.py
 Produces `dist/WinWall.exe`, a single self-contained file (Python and mpv
 bundled) that runs on a Windows PC with nothing installed.
 
+For a normal Windows installation with an entry in Settings > Apps > Installed
+apps and a working uninstaller, compile `installer.iss` after building the EXE.
+Tagged GitHub releases do this automatically.
+
 ## Project layout
 
 - `app.py` - the desktop app (library, browse, tray, settings)
