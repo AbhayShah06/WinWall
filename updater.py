@@ -40,7 +40,8 @@ def check(current_version):
     if not tag or not is_newer(tag, current_version):
         return None
     for a in data.get("assets", []):
-        if a.get("name", "").lower().endswith(".exe"):
+        # Setup executables must never replace the running portable application.
+        if a.get("name", "").lower() == "winwall.exe":
             return {"version": tag, "url": a["browser_download_url"],
                     "size": int(a.get("size", 0)), "digest": a.get("digest", ""),
                     "notes": data.get("body", "") or ""}

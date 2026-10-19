@@ -1,5 +1,5 @@
 #define MyAppName "WinWall"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.6"
 #define MyAppPublisher "Abhay Shah"
 #define MyAppExeName "WinWall.exe"
 
@@ -21,6 +21,9 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
+AppMutex=Local\AbhayShah.WinWall
+CloseApplications=yes
+RestartApplications=no
 
 [Files]
 Source: "dist\WinWall.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -35,5 +38,8 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
-[UninstallRun]
-Filename: "taskkill"; Parameters: "/IM {#MyAppExeName} /F"; Flags: runhidden; RunOnceId: "StopWinWall"
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "WinWall"; Flags: uninsdeletevalue
+
+[UninstallDelete]
+Type: files; Name: "{userstartup}\WinWall.lnk"

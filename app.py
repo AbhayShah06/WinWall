@@ -42,7 +42,7 @@ SETTINGS = os.path.join(DATA_DIR, "settings.json")
 VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".gif")
 CREATE_NO_WINDOW = 0x08000000
 ACCENT = "#7c5cff"
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 SELFTEST = "--selftest" in sys.argv or bool(os.environ.get("WINWALL_SELFTEST"))
 
 
@@ -1158,6 +1158,10 @@ SINGLETON = "WinWall_singleton_selftest" if SELFTEST else "WinWall_singleton"
 
 
 def main():
+    # Setup/uninstall checks this process-lifetime mutex before changing files.
+    import ctypes
+    ctypes.windll.kernel32.CreateMutexW.restype = ctypes.c_void_p
+    install_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\AbhayShah.WinWall") if not SELFTEST else None
     try:  # so Windows uses our icon on the taskbar (not a generic one)
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AbhayShah.WinWall")

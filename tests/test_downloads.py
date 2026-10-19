@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -25,6 +26,14 @@ class FakeResponse:
 
 
 class DownloadTests(unittest.TestCase):
+    def test_updater_uses_portable_app_not_setup(self):
+        release = {"tag_name": "v1.0.6", "assets": [
+            {"name": "WinWall-Setup-1.0.6.exe", "browser_download_url": "https://example.test/setup"},
+            {"name": "WinWall.exe", "browser_download_url": "https://example.test/app", "size": 1234567},
+        ]}
+        with mock.patch("urllib.request.urlopen", return_value=FakeResponse(json.dumps(release).encode())):
+            self.assertEqual(updater.check("1.0.5")["url"], "https://example.test/app")
+
     def test_version_comparison(self):
         self.assertTrue(updater.is_newer("1.0.3", "1.0.2"))
         self.assertFalse(updater.is_newer("v1.0.2", "1.0.2"))
