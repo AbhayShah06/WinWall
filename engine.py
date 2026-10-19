@@ -325,8 +325,12 @@ class WallpaperEngine:
         self.log(f"[engine] running on {len(players)} monitor(s)")
 
         last_health = time.time()
+        last_tick = time.monotonic()
         try:
             while not self._stop.is_set():
+                tick = time.monotonic()
+                resumed = tick - last_tick > 10
+                last_tick = tick
                 win32gui.PumpWaitingMessages()
                 self._update_pause(players)
                 # Self-heal: if Explorer restarts/crashes (Windows updates, a
@@ -334,11 +338,11 @@ class WallpaperEngine:
                 # parented into is destroyed and takes the video with it; mpv can
                 # also exit. Detect either and re-embed so the wallpaper never
                 # silently disappears until the next reboot.
-                if time.time() - last_health > 3:
+                if resumed or time.time() - last_health > 3:
                     last_health = time.time()
                     layout_changed = self._layout_changed(players)
-                    if layout_changed or not self._healthy(host, players):
-                        reason = "display layout changed" if layout_changed else "host/player lost"
+                    if resumed or layout_changed or not self._healthy(host, players):
+                        reason = "resumed from sleep" if resumed else "display layout changed" if layout_changed else "host/player lost"
                         self.log(f"[engine] {reason} -- re-embedding")
                         self._teardown(players)
                         host, players = self._spawn(video, mpv_exe)

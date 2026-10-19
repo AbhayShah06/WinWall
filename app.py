@@ -16,6 +16,7 @@ import json
 import shutil
 import winreg
 import subprocess
+import time
 import urllib.parse
 
 from PySide6 import QtCore, QtGui, QtNetwork, QtWidgets
@@ -27,11 +28,12 @@ from PySide6 import QtCore, QtGui, QtNetwork, QtWidgets
 import engine
 import shop
 import updater
+import winwall_state
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-# Wallpapers + settings live in a hidden per-user folder (%LOCALAPPDATA%\WinWall),
+# Wallpapers + settings live in a persistent per-user folder (~/.winwall),
 # the same whether run from source or as the packaged .exe. Not in the project.
-DATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "WinWall")
+DATA_DIR = winwall_state.data_dir()
 try:
     os.makedirs(DATA_DIR, exist_ok=True)
 except Exception:
@@ -42,7 +44,7 @@ SETTINGS = os.path.join(DATA_DIR, "settings.json")
 VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".gif")
 CREATE_NO_WINDOW = 0x08000000
 ACCENT = "#7c5cff"
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 SELFTEST = "--selftest" in sys.argv or bool(os.environ.get("WINWALL_SELFTEST"))
 
 
@@ -181,22 +183,45 @@ def thumb_path(video):
     return os.path.join(THUMB_DIR, stem + ".jpg")
 
 
+def _run_thumbnail(args, cancelled=None):
+    cancelled = cancelled or (lambda: QtCore.QThread.currentThread().isInterruptionRequested())
+    process = subprocess.Popen(args, creationflags=CREATE_NO_WINDOW)
+    deadline = time.monotonic() + 25
+    try:
+        while process.poll() is None:
+            if cancelled() or time.monotonic() >= deadline:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
+                return False
+            time.sleep(.05)
+        return process.returncode == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+
+
 def make_thumbnail(mpv, video, out):
     os.makedirs(THUMB_DIR, exist_ok=True)
     base = ["--no-config", "--really-quiet", "--no-audio", "--start=10%",
             "--frames=1", "--vf=scale=520:-2"]
     try:
-        subprocess.run([mpv, video, *base, f"--o={out}"],
-                       timeout=25, creationflags=CREATE_NO_WINDOW)
+        _run_thumbnail([mpv, video, *base, f"--o={out}"])
         if os.path.exists(out) and os.path.getsize(out) > 0:
             return True
     except Exception:
         pass
+    if QtCore.QThread.currentThread().isInterruptionRequested():
+        return False
     try:
         d = out + "_d"
         os.makedirs(d, exist_ok=True)
-        subprocess.run([mpv, video, *base, "--vo=image", "--vo-image-format=jpg",
-                        f"--vo-image-outdir={d}"], timeout=25, creationflags=CREATE_NO_WINDOW)
+        _run_thumbnail([mpv, video, *base, "--vo=image", "--vo-image-format=jpg",
+                        f"--vo-image-outdir={d}"])
         imgs = [f for f in os.listdir(d) if f.lower().endswith((".jpg", ".png"))]
         if imgs:
             shutil.move(os.path.join(d, imgs[0]), out)
@@ -218,6 +243,8 @@ class ThumbWorker(QtCore.QThread):
 
     def run(self):
         for v in self.videos:
+            if self.isInterruptionRequested():
+                break
             out = thumb_path(v)
             if os.path.exists(out) and os.path.getsize(out) > 0:
                 self.done.emit(v, out)
@@ -948,9 +975,7 @@ class WinWall(QtWidgets.QMainWindow):
         except Exception as e:
             self._update_failed(str(e))
             return
-        self.engine.stop()
-        self.tray.hide()
-        QtCore.QTimer.singleShot(400, QtWidgets.QApplication.quit)
+        QtCore.QTimer.singleShot(400, self._quit)
 
     def _update_failed(self, msg):
         self.update_btn.setEnabled(True)
@@ -1149,9 +1174,37 @@ class WinWall(QtWidgets.QMainWindow):
             QtCore.QTimer.singleShot(1500, trim_memory)
 
     def _quit(self):
+        if getattr(self, "_quitting", False):
+            return
+        self._quitting = True
         self.engine.stop()
         self.tray.hide()
-        QtWidgets.QApplication.quit()
+        self.hide()
+        for worker in self._active_workers():
+            worker.requestInterruption()
+        self._finish_quit()
+
+    def _active_workers(self):
+        workers = list(self._browse_workers)
+        for name in ("_thumb_worker", "_apply_worker", "_search_worker", "_dl_worker", "_upd_check", "_dlu"):
+            worker = getattr(self, name, None)
+            if worker is not None:
+                workers.append(worker)
+        active = []
+        for worker in workers:
+            try:
+                if worker.isRunning() and worker not in active:
+                    active.append(worker)
+            except RuntimeError:
+                pass
+        return active
+
+    def _finish_quit(self):
+        # QThread destruction during thumbnail/network work aborts the process.
+        if self._active_workers():
+            QtCore.QTimer.singleShot(100, self._finish_quit)
+        else:
+            QtWidgets.QApplication.quit()
 
 
 SINGLETON = "WinWall_singleton_selftest" if SELFTEST else "WinWall_singleton"
