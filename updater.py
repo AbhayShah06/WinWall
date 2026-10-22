@@ -15,7 +15,7 @@ import tempfile
 import subprocess
 import urllib.request
 
-REPO = "AbhayShah06/WinWall-dist"   # public releases-only repo (code stays private)
+REPO = "AbhayShah06/WinWall"
 _CREATE_NO_WINDOW = 0x08000000
 _NEW_GROUP = 0x00000200
 

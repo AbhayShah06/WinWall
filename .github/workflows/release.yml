@@ -17,6 +17,16 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt -r requirements-build.txt
+      - run: python -m unittest discover -s tests
+      - name: Prepare bundled player
+        shell: pwsh
+        run: |
+          choco install mpvio.install --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "mpv installation failed" }
+          $mpv = Get-ChildItem 'C:\ProgramData\chocolatey\lib\mpvio.install' -Filter mpv.exe -Recurse | Select-Object -First 1
+          if (-not $mpv) { throw "mpv.exe missing" }
+          New-Item -ItemType Directory -Force resources/bin | Out-Null
+          Copy-Item -LiteralPath $mpv.FullName resources/bin/mpv.exe
       - run: python build_exe.py
       - name: Build proper Windows installer and uninstaller
         run: choco install innosetup --yes --no-progress && iscc installer.iss
@@ -28,4 +38,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: installer-output/*.exe
+          files: |
+            dist/WinWall.exe
+            installer-output/*.exe

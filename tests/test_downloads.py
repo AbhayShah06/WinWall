@@ -26,6 +26,16 @@ class FakeResponse:
 
 
 class DownloadTests(unittest.TestCase):
+    def test_update_migrates_to_main_repo_and_same_version_is_quiet(self):
+        release = {"tag_name": "v1.0.8", "assets": [
+            {"name": "WinWall.exe", "browser_download_url": "https://github.com/AbhayShah06/WinWall/releases/download/v1.0.8/WinWall.exe", "size": 1234567},
+        ]}
+        with mock.patch("urllib.request.urlopen", side_effect=lambda *_args, **_kwargs: FakeResponse(json.dumps(release).encode())) as request:
+            self.assertIn("/WinWall/releases/download/", updater.check("1.0.7")["url"])
+            self.assertEqual(request.call_args.args[0].full_url,
+                             "https://api.github.com/repos/AbhayShah06/WinWall/releases/latest")
+            self.assertIsNone(updater.check("1.0.8"))
+
     def test_updater_uses_portable_app_not_setup(self):
         release = {"tag_name": "v1.0.6", "assets": [
             {"name": "WinWall-Setup-1.0.6.exe", "browser_download_url": "https://example.test/setup"},

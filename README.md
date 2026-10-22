@@ -4,6 +4,8 @@ A lightweight live-wallpaper app for Windows. Plays looping videos as your
 desktop wallpaper on all monitors, with a built-in shop to browse and download
 new ones. Built to stay light on the battery.
 
+Download the app or installer from [Releases](https://github.com/AbhayShah06/WinWall/releases/latest). Source, downloads and future updates live here. The old `WinWall-dist` repository only carries the final migration update for older installations.
+
 ## Features
 
 - **Live video wallpaper** on all monitors, behind your desktop icons.
